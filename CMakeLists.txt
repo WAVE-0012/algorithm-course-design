@@ -6,5 +6,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 add_executable(gpu_scheduler
     src/main.cpp
+    src/parser.cpp
+    src/machine_state.cpp
+    src/scheduler.cpp
     src/output.cpp
 )

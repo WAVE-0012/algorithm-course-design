@@ -365,6 +365,9 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="C:\Users\13569\Desktop\algorithm-course-design\src\main.cpp" />
+    <ClCompile Include="C:\Users\13569\Desktop\algorithm-course-design\src\parser.cpp" />
+    <ClCompile Include="C:\Users\13569\Desktop\algorithm-course-design\src\machine_state.cpp" />
+    <ClCompile Include="C:\Users\13569\Desktop\algorithm-course-design\src\scheduler.cpp" />
     <ClCompile Include="C:\Users\13569\Desktop\algorithm-course-design\src\output.cpp" />
   </ItemGroup>
   <ItemGroup />

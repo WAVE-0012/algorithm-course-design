@@ -4,6 +4,15 @@
     <ClCompile Include="C:\Users\13569\Desktop\algorithm-course-design\src\main.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="C:\Users\13569\Desktop\algorithm-course-design\src\parser.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\13569\Desktop\algorithm-course-design\src\machine_state.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\Users\13569\Desktop\algorithm-course-design\src\scheduler.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="C:\Users\13569\Desktop\algorithm-course-design\src\output.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
