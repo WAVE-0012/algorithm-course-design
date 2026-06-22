@@ -4,6 +4,9 @@
     <ClCompile Include="C:\Users\13569\Desktop\algorithm-course-design\src\main.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="C:\Users\13569\Desktop\algorithm-course-design\src\output.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <CustomBuild Include="C:\Users\13569\Desktop\algorithm-course-design\CMakeLists.txt" />
