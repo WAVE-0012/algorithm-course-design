@@ -1,15 +1,17 @@
-#ifndef SCHEDULED_H
-#define SCHEDULED_H
+#ifndef SCHEDULER_H
+#define SCHEDULER_H
 
-#include<vector>
-#include "Server.h"
+#include <vector>
 #include "Job.h"
+#include "ResourceManager.h"
 
-class Scheduler{
+class Scheduler {
+private:
+    ResourceManager* rm;
+
 public:
-    bool find_gpu_placement(Server&server,int g,int v,std::vector<int>&out_gpus);
-
-    void make_decisions(int current_time,std::vector<Server>&servers,std::vector<Job>&jobs);
+    Scheduler(ResourceManager* resource_manager) : rm(resource_manager) {}
+    void make_decisions(int current_time, std::vector<Job>& jobs);
 };
 
 #endif

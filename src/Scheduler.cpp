@@ -1,45 +1,31 @@
-#include"Scheduler.h"
-#include<algorithm>
-bool Scheduler::find_gpu_placement(Server& server,int g,int v,std::vector<int>&out_gpus){
-    if(server.G<g) return false;
+#include "Scheduler.h"
+#include <algorithm>
 
-    int required_per_gpu=(v+g-1)/g;
-    if(required_per_gpu>server.VG)return false;
-
-    out_gpus.clear();
-    for(int i=0;i<server.G;++i){
-        if(server.gpu_free_mem[i]>=required_per_gpu){
-            out_gpus.push_back(i);
-            if(out_gpus.size()==g) return true;
+void Scheduler::make_decisions(int current_time, std::vector<Job>& jobs) {
+    std::vector<Job*> ready_jobs;
+    for (auto& job : jobs) {
+        if (!job.is_scheduled && job.r <= current_time) {
+            ready_jobs.push_back(&job);
         }
     }
-    return false;
-}
 
-void Scheduler::make_decisions(int current_time,std::vector<Server>&servers,std::vector<Job>&jobs){
-    for(auto&job:jobs){
-        if(!job.is_scheduled&&job.r<=current_time){
-            for(auto&server:servers){
-                if(server.free_cpu>=job.c&&server.free_mem>=job.m){
-                    std::vector<int> target_gpus;
+    std::sort(ready_jobs.begin(), ready_jobs.end(), [](Job* a, Job* b) {
+        if (a->w != b->w) return a->w > b->w;
+        if (a->p != b->p) return a->p < b->p;
+        return a->id < b->id;
+    });
 
-                    if(find_gpu_placement(server,job.g,job.v,target_gpus)){
+    for (auto* job : ready_jobs) {
+        if (job->is_scheduled) continue;
+        
+        int allocated_server_id;
+        std::vector<int> allocated_gpus;
 
-                        server.free_cpu-=job.c;
-                        server.free_mem-=job.m;
-                        int required_per_gpu=(job.v+job.g-1)/job.g;
-                        for(int gpu_idx:target_gpus){
-                            server.gpu_free_mem[gpu_idx]-=required_per_gpu;
-                        }
-                        job.is_scheduled=true;
-                        job.start_time=current_time;
-                        job.allocated_server=server.id;
-                        job.allocated_gpus=target_gpus;
-                        
-                        break;
-                    }
-                }
-            }
+        if (rm->try_allocate(*job, allocated_server_id, allocated_gpus)) {
+            job->is_scheduled = true;
+            job->start_time = current_time;
+            job->allocated_server = allocated_server_id;
+            job->allocated_gpus = allocated_gpus;
         }
     }
 }
