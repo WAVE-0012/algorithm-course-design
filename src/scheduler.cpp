@@ -3,16 +3,39 @@
 #include <algorithm>
 #include <stdexcept>
 #include <queue>
+#include <vector>
+#include <cmath>
+#include <limits>
+#include <unordered_map>
 
 using namespace std;
 
+// ============================================================
+// Priority 权重
+// ============================================================
+
+constexpr long long WEIGHT_FACTOR   = 100000LL;
+constexpr long long DURATION_FACTOR = 50LL;
+constexpr long long GPU_FACTOR      = 20LL;
+constexpr long long CPU_FACTOR      = 1LL;
+constexpr long long MEM_FACTOR      = 1LL;
+
+// Aging
+constexpr double AGING_SCALE = 2000.0;
+
+// Easy Start（整数计算，避免截断）
+constexpr long long EASY_START_SCALE = 500LL;
+
+// Dynamic Best-Fit 权重
+constexpr double REMAIN_GPU_WEIGHT      = 2.0;
+constexpr double REMAIN_CPU_WEIGHT      = 1.0;
+constexpr double REMAIN_MEM_WEIGHT      = 0.5;
+constexpr double FRAGMENT_PENALTY_WEIGHT = 3.0;
+
+// ============================================================
+
 bool compareServerById(const ServerSpec &a, const ServerSpec &b) {
     return a.server_id < b.server_id;
-}
-
-bool compareJobByRelease(const Job &a, const Job &b) {
-    if (a.release_time != b.release_time) return a.release_time < b.release_time;
-    return a.job_id < b.job_id;
 }
 
 bool FinishEvent::operator>(const FinishEvent &other) const {
@@ -23,31 +46,35 @@ bool FinishEvent::operator>(const FinishEvent &other) const {
 
 namespace {
 
-long long priorityScore(const Job& job) {
-    return
-        100000LL * job.weight
-        - 50LL * job.duration
-        - 20LL * job.min_gpu
-        - job.cpu_cores
-        - job.memory / 100;
+// ============================================================
+// Dynamic Priority Score
+// ============================================================
+
+long long dynamicPriorityScore(const Job& job, long long current_time) {
+    long long score =
+        WEIGHT_FACTOR   * job.weight
+        - DURATION_FACTOR * job.duration
+        - GPU_FACTOR      * job.min_gpu
+        - CPU_FACTOR      * job.cpu_cores
+        - MEM_FACTOR   * (job.memory / 100);
+
+    long long waiting = current_time - job.release_time;
+    if (waiting < 0) waiting = 0;
+
+    score += static_cast<long long>(
+        std::sqrt(static_cast<double>(waiting)) * AGING_SCALE
+    );
+
+    score += EASY_START_SCALE / (job.min_gpu + 1);
+
+    return score;
 }
 
-struct JobCmp {
-    bool operator()(const Job& a, const Job& b) const {
-        long long sa = priorityScore(a);
-        long long sb = priorityScore(b);
+} // namespace
 
-        if (sa != sb)
-            return sa < sb;
-
-        if (a.duration != b.duration)
-            return a.duration > b.duration;
-
-        return a.job_id > b.job_id;
-    }
-};
-
-}
+// ============================================================
+// 构造函数
+// ============================================================
 
 GreedyScheduler::GreedyScheduler(
     vector<ServerSpec> input_servers,
@@ -57,18 +84,26 @@ GreedyScheduler::GreedyScheduler(
       jobs(move(input_jobs)) {
 
     sort(servers.begin(), servers.end(), compareServerById);
-    sort(jobs.begin(), jobs.end(), compareJobByRelease);
+    sort(jobs.begin(), jobs.end(),
+        [](const Job &a, const Job &b) {
+            if (a.release_time != b.release_time) return a.release_time < b.release_time;
+            return a.job_id < b.job_id;
+        });
 
     for (const auto& server : servers) {
         machines.emplace_back(server);
     }
 
-    for (int i = 0; i < (int)machines.size(); ++i) {
-        machine_index_by_id[machines[i].spec.server_id] = i;
+    for (size_t i = 0; i < machines.size(); ++i) {
+        machine_index_by_id[machines[i].spec.server_id] = static_cast<int>(i);
     }
 
     buildFeasibleMachines();
 }
+
+// ============================================================
+// schedule()
+// ============================================================
 
 vector<ScheduleRecord> GreedyScheduler::schedule() {
 
@@ -77,7 +112,6 @@ vector<ScheduleRecord> GreedyScheduler::schedule() {
     }
 
     long long current_time = jobs.front().release_time;
-
     int next_job_index = 0;
 
     unordered_map<int, ScheduleRecord> records;
@@ -88,37 +122,104 @@ vector<ScheduleRecord> GreedyScheduler::schedule() {
         greater<FinishEvent>
     > running_heap;
 
-    priority_queue<Job, vector<Job>, JobCmp> pending_jobs;
+    // 使用 vector 支持动态 Aging 排序
+    vector<Job> pending_vec;
+    pending_vec.reserve(jobs.size());
 
     while ((int)records.size() < (int)jobs.size()) {
 
+        // 释放已完成任务
         releaseFinishedJobs(current_time, running_heap);
 
-        while (next_job_index < (int)jobs.size()
-               && jobs[next_job_index].release_time <= current_time) {
+        // 加入新到达任务
+        while (next_job_index < (int)jobs.size() &&
+               jobs[next_job_index].release_time <= current_time) {
 
-            pending_jobs.push(jobs[next_job_index]);
+            pending_vec.push_back(jobs[next_job_index]);
             ++next_job_index;
         }
 
+        // =====================================================
+        // 动态统计等待队列 GPU 75% 分位数（供 Best-Fit 使用）
+        // =====================================================
+        if (!pending_vec.empty()) {
+
+            vector<int> gpu_demands;
+            gpu_demands.reserve(pending_vec.size());
+
+            for (const auto &job : pending_vec) {
+                gpu_demands.push_back(job.min_gpu);
+            }
+
+            sort(gpu_demands.begin(), gpu_demands.end());
+
+            size_t idx =
+                static_cast<size_t>(gpu_demands.size() * 0.75);
+
+            if (idx >= gpu_demands.size()) {
+                idx = gpu_demands.size() - 1;
+            }
+
+            cached_dynamic_threshold_gpu =
+                gpu_demands[idx];
+        }
+        else {
+            cached_dynamic_threshold_gpu = 1;
+        }
+
+        // =====================================================
+        // 回填调度
+        // 每成功启动一个任务都会重新排序（Dynamic Aging）
+        // =====================================================
         bool progress = true;
 
         while (progress) {
 
             progress = false;
 
+            sort(
+                pending_vec.begin(),
+                pending_vec.end(),
+                [current_time](const Job &a,
+                               const Job &b) {
+
+                    long long sa =
+                        dynamicPriorityScore(
+                            a,
+                            current_time
+                        );
+
+                    long long sb =
+                        dynamicPriorityScore(
+                            b,
+                            current_time
+                        );
+
+                    if (sa != sb)
+                        return sa > sb;
+
+                    if (a.duration != b.duration)
+                        return a.duration < b.duration;
+
+                    return a.job_id < b.job_id;
+                }
+            );
+
             vector<Job> remain;
+            remain.reserve(pending_vec.size());
 
-            while (!pending_jobs.empty()) {
+            for (const auto &job : pending_vec) {
 
-                Job job = pending_jobs.top();
-                pending_jobs.pop();
-
-                auto started = tryStartOneJob(job, current_time);
+                auto started =
+                    tryStartOneJob(
+                        job,
+                        current_time
+                    );
 
                 if (started.has_value) {
 
-                    records[job.job_id] = started.record;
+                    records[job.job_id] =
+                        started.record;
 
                     running_heap.push(
                         FinishEvent{
@@ -136,35 +237,40 @@ vector<ScheduleRecord> GreedyScheduler::schedule() {
                 }
             }
 
-            for (auto &j : remain) {
-                pending_jobs.push(j);
-            }
+            pending_vec.swap(remain);
         }
 
-        if ((int)records.size() == (int)jobs.size()) {
+        if ((int)records.size() ==
+            (int)jobs.size()) {
             break;
         }
 
-        current_time = nextEventTime(
-            current_time,
-            next_job_index,
-            running_heap
-        );
+        current_time =
+            nextEventTime(
+                current_time,
+                next_job_index,
+                running_heap
+            );
     }
 
     vector<ScheduleRecord> ordered;
-
     ordered.reserve(records.size());
 
     for (int job_id = 1;
          job_id <= (int)jobs.size();
          ++job_id) {
 
-        ordered.push_back(records.at(job_id));
+        ordered.push_back(
+            records.at(job_id)
+        );
     }
 
     return ordered;
 }
+
+// ============================================================
+// buildFeasibleMachines()
+// ============================================================
 
 void GreedyScheduler::buildFeasibleMachines() {
 
@@ -194,6 +300,10 @@ void GreedyScheduler::buildFeasibleMachines() {
     }
 }
 
+// ============================================================
+// releaseFinishedJobs()
+// ============================================================
+
 void GreedyScheduler::releaseFinishedJobs(
     long long current_time,
     priority_queue<
@@ -216,17 +326,9 @@ void GreedyScheduler::releaseFinishedJobs(
     }
 }
 
-void GreedyScheduler::tryStartPendingJobs(
-    queue<Job>&,
-    long long,
-    unordered_map<int, ScheduleRecord>&,
-    priority_queue<
-        FinishEvent,
-        vector<FinishEvent>,
-        greater<FinishEvent>
-    >&
-) {
-}
+// ============================================================
+// tryStartOneJob()
+// ============================================================
 
 GreedyScheduler::StartResult
 GreedyScheduler::tryStartOneJob(
@@ -234,40 +336,82 @@ GreedyScheduler::tryStartOneJob(
     long long current_time
 ) {
 
-    const auto& entries =
+    const auto &entries =
         feasible_machines.at(job.job_id);
 
     int best_machine = -1;
     int best_gpu = -1;
 
-    long long best_cost =
-        (1LL << 60);
+    double best_cost =
+        numeric_limits<double>::max();
 
-    for (const auto& entry : entries) {
+    for (const auto &entry : entries) {
 
         int machine_index = entry.first;
         int gpu_used = entry.second;
 
-        if (!machines[machine_index]
-                 .canStart(job, gpu_used))
+        if (!machines[machine_index].canStart(job, gpu_used)) {
             continue;
+        }
 
-        const auto& spec =
-            machines[machine_index].spec;
+        const auto &machine = machines[machine_index];
+        const auto &spec = machine.spec;
 
-        long long waste_gpu =
-            spec.gpu_count - gpu_used;
+        // =====================================================
+        // Dynamic Best-Fit：基于真实剩余资源
+        // =====================================================
 
-        long long waste_cpu =
-            spec.cpu_cores - job.cpu_cores;
+        long long remain_gpu_after =
+            max(0LL,
+                (long long)machine.getRemainingGpu() - gpu_used);
 
-        long long waste_mem =
-            spec.memory - job.memory;
+        long long remain_cpu_after =
+            max(0LL,
+                (long long)machine.getRemainingCpu() - job.cpu_cores);
 
-        long long cost =
-            waste_gpu * 1000000LL
-            + waste_cpu * 1000LL
-            + waste_mem;
+        long long remain_mem_after =
+            max(0LL,
+                (long long)machine.getRemainingMemory() - job.memory);
+
+        double gpu_ratio =
+            static_cast<double>(remain_gpu_after) /
+            max(1, spec.gpu_count);
+
+        double cpu_ratio =
+            static_cast<double>(remain_cpu_after) /
+            max(1, spec.cpu_cores);
+
+        double mem_ratio =
+            static_cast<double>(remain_mem_after) /
+            max(1, spec.memory);
+
+        // =====================================================
+        // Fragmentation Penalty
+        // 使用 schedule() 每轮统计得到的 GPU 75% 分位数
+        // =====================================================
+
+        double fragment_penalty = 0.0;
+
+        if (remain_gpu_after > 0 &&
+            remain_gpu_after < cached_dynamic_threshold_gpu) {
+
+            fragment_penalty =
+                static_cast<double>(
+                    cached_dynamic_threshold_gpu -
+                    remain_gpu_after
+                ) /
+                max(1, cached_dynamic_threshold_gpu);
+        }
+
+        // =====================================================
+        // Dynamic Best-Fit Cost
+        // =====================================================
+
+        double cost =
+              REMAIN_GPU_WEIGHT * gpu_ratio
+            + REMAIN_CPU_WEIGHT * cpu_ratio
+            + REMAIN_MEM_WEIGHT * mem_ratio
+            + FRAGMENT_PENALTY_WEIGHT * fragment_penalty;
 
         if (cost < best_cost) {
             best_cost = cost;
@@ -281,12 +425,11 @@ GreedyScheduler::tryStartOneJob(
     }
 
     auto result =
-        machines[best_machine]
-            .startJob(
-                job,
-                current_time,
-                best_gpu
-            );
+        machines[best_machine].startJob(
+            job,
+            current_time,
+            best_gpu
+        );
 
     return StartResult{
         true,
@@ -295,6 +438,9 @@ GreedyScheduler::tryStartOneJob(
     };
 }
 
+// ============================================================
+// nextEventTime()
+// ============================================================
 long long GreedyScheduler::nextEventTime(
     long long current_time,
     int next_job_index,
@@ -305,36 +451,23 @@ long long GreedyScheduler::nextEventTime(
     >& running_heap
 ) const {
 
-    vector<long long> candidates;
+    long long next_time = numeric_limits<long long>::max();
 
-    if (next_job_index < (int)jobs.size()) {
-        candidates.push_back(
-            jobs[next_job_index].release_time
-        );
+    if (next_job_index < static_cast<int>(jobs.size())) {
+        next_time = min(next_time, static_cast<long long>(jobs[next_job_index].release_time));
     }
 
     if (!running_heap.empty()) {
-        candidates.push_back(
-            running_heap.top().finish_time
-        );
+        next_time = min(next_time, running_heap.top().finish_time);
     }
 
-    long long next_time = -1;
-
-    for (long long t : candidates) {
-
-        if (t <= current_time)
-            continue;
-
-        if (next_time == -1 || t < next_time) {
-            next_time = t;
-        }
+    if (next_time == numeric_limits<long long>::max()) {
+        throw runtime_error("No future event exists.");
     }
 
-    if (next_time == -1) {
-        throw runtime_error(
-            "No future event exists."
-        );
+    // 保证时间严格推进，避免死循环
+    if (next_time <= current_time) {
+        next_time = current_time + 1;
     }
 
     return next_time;

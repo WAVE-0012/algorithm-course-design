@@ -19,7 +19,10 @@ struct FinishEvent {
 
 class GreedyScheduler {
 public:
-    GreedyScheduler(std::vector<ServerSpec> input_servers, std::vector<Job> input_jobs);
+    GreedyScheduler(
+        std::vector<ServerSpec> input_servers,
+        std::vector<Job> input_jobs
+    );
 
     std::vector<ScheduleRecord> schedule();
 
@@ -31,29 +34,44 @@ private:
     };
 
     void buildFeasibleMachines();
+
     void releaseFinishedJobs(
         long long current_time,
-        std::priority_queue<FinishEvent, std::vector<FinishEvent>, std::greater<FinishEvent>> &running_heap
+        std::priority_queue<
+            FinishEvent,
+            std::vector<FinishEvent>,
+            std::greater<FinishEvent>
+        >& running_heap
     );
-    void tryStartPendingJobs(
-        std::queue<Job> &pending_jobs,
-        long long current_time,
-        std::unordered_map<int, ScheduleRecord> &records,
-        std::priority_queue<FinishEvent, std::vector<FinishEvent>, std::greater<FinishEvent>> &running_heap
+
+    StartResult tryStartOneJob(
+        const Job &job,
+        long long current_time
     );
-    StartResult tryStartOneJob(const Job &job, long long current_time);
+
     long long nextEventTime(
         long long current_time,
         int next_job_index,
-        const std::priority_queue<FinishEvent, std::vector<FinishEvent>, std::greater<FinishEvent>> &running_heap
+        const std::priority_queue<
+            FinishEvent,
+            std::vector<FinishEvent>,
+            std::greater<FinishEvent>
+        >& running_heap
     ) const;
 
     std::vector<ServerSpec> servers;
     std::vector<Job> jobs;
     std::vector<MachineState> machines;
+
     std::unordered_map<int, int> machine_index_by_id;
-    std::unordered_map<int, std::vector<std::pair<int, int>>> feasible_machines;
+
+    std::unordered_map<
+        int,
+        std::vector<std::pair<int, int>>
+    > feasible_machines;
+
+    // 当前等待队列 GPU 需求的 75% 分位数（每轮 schedule() 动态更新）
+    int cached_dynamic_threshold_gpu = 1;
 };
 
 #endif
-
