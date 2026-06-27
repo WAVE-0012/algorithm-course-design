@@ -56,7 +56,7 @@ long long dynamicPriorityScore(const Job& job, long long current_time) {
         - DURATION_FACTOR * job.duration
         - GPU_FACTOR      * job.min_gpu
         - CPU_FACTOR      * job.cpu_cores
-        - MEM_FACTOR   * (job.memory / 100);
+        - MEM_FACTOR      * (job.memory / 100);
 
     long long waiting = current_time - job.release_time;
     if (waiting < 0) waiting = 0;
@@ -122,16 +122,13 @@ vector<ScheduleRecord> GreedyScheduler::schedule() {
         greater<FinishEvent>
     > running_heap;
 
-    // 使用 vector 支持动态 Aging 排序
     vector<Job> pending_vec;
     pending_vec.reserve(jobs.size());
 
     while ((int)records.size() < (int)jobs.size()) {
 
-        // 释放已完成任务
         releaseFinishedJobs(current_time, running_heap);
 
-        // 加入新到达任务
         while (next_job_index < (int)jobs.size() &&
                jobs[next_job_index].release_time <= current_time) {
 
@@ -140,7 +137,7 @@ vector<ScheduleRecord> GreedyScheduler::schedule() {
         }
 
         // =====================================================
-        // 动态统计等待队列 GPU 75% 分位数（供 Best-Fit 使用）
+        // 动态统计等待队列 GPU 75% 分位数
         // =====================================================
         if (!pending_vec.empty()) {
 
@@ -151,25 +148,23 @@ vector<ScheduleRecord> GreedyScheduler::schedule() {
                 gpu_demands.push_back(job.min_gpu);
             }
 
-            sort(gpu_demands.begin(), gpu_demands.end());
+            size_t idx = static_cast<size_t>(gpu_demands.size() * 3 / 4);
+            if (idx >= gpu_demands.size()) idx = gpu_demands.size() - 1;
 
-            size_t idx =
-                static_cast<size_t>(gpu_demands.size() * 0.75);
+            nth_element(
+                gpu_demands.begin(),
+                gpu_demands.begin() + idx,
+                gpu_demands.end()
+            );
 
-            if (idx >= gpu_demands.size()) {
-                idx = gpu_demands.size() - 1;
-            }
-
-            cached_dynamic_threshold_gpu =
-                gpu_demands[idx];
+            cached_dynamic_threshold_gpu = gpu_demands[idx];
         }
         else {
             cached_dynamic_threshold_gpu = 1;
         }
 
         // =====================================================
-        // 回填调度
-        // 每成功启动一个任务都会重新排序（Dynamic Aging）
+        // 回填调度 + Fit-aware Priority + 同优先级小GPU优先
         // =====================================================
         bool progress = true;
 
@@ -177,26 +172,34 @@ vector<ScheduleRecord> GreedyScheduler::schedule() {
 
             progress = false;
 
-            sort(
-                pending_vec.begin(),
-                pending_vec.end(),
-                [current_time](const Job &a,
-                               const Job &b) {
+            // 每轮重建缓存
+            vector<char> can_start(jobs.size() + 1, 0);
+            for (const auto &job : pending_vec) {
+                const auto &entries = feasible_machines.at(job.job_id);
+                for (const auto &entry : entries) {
+                    if (machines[entry.first].canStart(job, entry.second)) {
+                        can_start[job.job_id] = 1;
+                        break;
+                    }
+                }
+            }
 
-                    long long sa =
-                        dynamicPriorityScore(
-                            a,
-                            current_time
-                        );
+            sort(pending_vec.begin(), pending_vec.end(),
+                [this, current_time, &can_start](const Job &a, const Job &b) {
+                    bool a_can = can_start[a.job_id] == 1;
+                    bool b_can = can_start[b.job_id] == 1;
 
-                    long long sb =
-                        dynamicPriorityScore(
-                            b,
-                            current_time
-                        );
+                    if (a_can && !b_can) return true;
+                    if (!a_can && b_can) return false;
 
-                    if (sa != sb)
-                        return sa > sb;
+                    long long sa = dynamicPriorityScore(a, current_time);
+                    long long sb = dynamicPriorityScore(b, current_time);
+
+                    if (sa != sb) return sa > sb;
+
+                    // ===== 同优先级下：小GPU优先 =====
+                    if (a.min_gpu != b.min_gpu)
+                        return a.min_gpu < b.min_gpu;
 
                     if (a.duration != b.duration)
                         return a.duration < b.duration;
@@ -296,6 +299,30 @@ void GreedyScheduler::buildFeasibleMachines() {
             );
         }
 
+        // =====================================================
+        // GPU Packing：按浪费最少排序
+        // =====================================================
+        sort(entries.begin(), entries.end(),
+            [this](const pair<int,int> &a, const pair<int,int> &b) {
+                const auto &specA = machines[a.first].spec;
+                const auto &specB = machines[b.first].spec;
+
+                int wasteA = specA.gpu_count - a.second;
+                int wasteB = specB.gpu_count - b.second;
+
+                if (wasteA != wasteB)
+                    return wasteA < wasteB;
+
+                if (specA.cpu_cores != specB.cpu_cores)
+                    return specA.cpu_cores < specB.cpu_cores;
+
+                if (specA.memory != specB.memory)
+                    return specA.memory < specB.memory;
+
+                return a.first < b.first;
+            }
+        );
+
         feasible_machines[job.job_id] = move(entries);
     }
 }
@@ -357,10 +384,6 @@ GreedyScheduler::tryStartOneJob(
         const auto &machine = machines[machine_index];
         const auto &spec = machine.spec;
 
-        // =====================================================
-        // Dynamic Best-Fit：基于真实剩余资源
-        // =====================================================
-
         long long remain_gpu_after =
             max(0LL,
                 (long long)machine.getRemainingGpu() - gpu_used);
@@ -386,10 +409,8 @@ GreedyScheduler::tryStartOneJob(
             max(1, spec.memory);
 
         // =====================================================
-        // Fragmentation Penalty
-        // 使用 schedule() 每轮统计得到的 GPU 75% 分位数
+        // 碎片惩罚（连续值）
         // =====================================================
-
         double fragment_penalty = 0.0;
 
         if (remain_gpu_after > 0 &&
@@ -402,10 +423,6 @@ GreedyScheduler::tryStartOneJob(
                 ) /
                 max(1, cached_dynamic_threshold_gpu);
         }
-
-        // =====================================================
-        // Dynamic Best-Fit Cost
-        // =====================================================
 
         double cost =
               REMAIN_GPU_WEIGHT * gpu_ratio
@@ -441,6 +458,7 @@ GreedyScheduler::tryStartOneJob(
 // ============================================================
 // nextEventTime()
 // ============================================================
+
 long long GreedyScheduler::nextEventTime(
     long long current_time,
     int next_job_index,
@@ -454,18 +472,23 @@ long long GreedyScheduler::nextEventTime(
     long long next_time = numeric_limits<long long>::max();
 
     if (next_job_index < static_cast<int>(jobs.size())) {
-        next_time = min(next_time, static_cast<long long>(jobs[next_job_index].release_time));
+        next_time = min(
+            next_time,
+            static_cast<long long>(jobs[next_job_index].release_time)
+        );
     }
 
     if (!running_heap.empty()) {
-        next_time = min(next_time, running_heap.top().finish_time);
+        next_time = min(
+            next_time,
+            running_heap.top().finish_time
+        );
     }
 
     if (next_time == numeric_limits<long long>::max()) {
         throw runtime_error("No future event exists.");
     }
 
-    // 保证时间严格推进，避免死循环
     if (next_time <= current_time) {
         next_time = current_time + 1;
     }

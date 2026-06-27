@@ -13,8 +13,20 @@ public:
     int requiredGpuCount(const Job &job) const;
     bool canEverRun(const Job &job, int gpu_used) const;
     bool canStart(const Job &job, int gpu_used) const;
-    std::pair<ScheduleRecord, RunningJob> startJob(const Job &job, long long current_time, int gpu_used);
+
+    std::pair<ScheduleRecord, RunningJob> startJob(
+        const Job &job,
+        long long current_time,
+        int gpu_used
+    );
+
     void releaseJob(const RunningJob &running_job);
+
+    // ===== Added getters for dynamic best-fit =====
+    int getRemainingGpu() const;
+    int getRemainingCpu() const;
+    int getRemainingMemory() const;
+    // ==============================================
 
     ServerSpec spec;
 
@@ -22,8 +34,8 @@ private:
     int remaining_gpu = 0;
     int remaining_cpu = 0;
     int remaining_memory = 0;
+
     std::vector<RunningJob> running_jobs;
 };
 
 #endif
-

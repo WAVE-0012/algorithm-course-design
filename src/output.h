@@ -1,4 +1,4 @@
-﻿#ifndef GPU_SCHEDULING_OUTPUT_H
+#ifndef GPU_SCHEDULING_OUTPUT_H
 #define GPU_SCHEDULING_OUTPUT_H
 
 #include <ostream>

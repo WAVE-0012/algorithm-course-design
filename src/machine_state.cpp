@@ -25,7 +25,11 @@ bool MachineState::canStart(const Job &job, int gpu_used) const {
            job.memory <= remaining_memory;
 }
 
-pair<ScheduleRecord, RunningJob> MachineState::startJob(const Job &job, long long current_time, int gpu_used) {
+pair<ScheduleRecord, RunningJob> MachineState::startJob(
+    const Job &job,
+    long long current_time,
+    int gpu_used
+) {
     long long finish_time = current_time + job.duration;
 
     remaining_gpu -= gpu_used;
@@ -40,6 +44,7 @@ pair<ScheduleRecord, RunningJob> MachineState::startJob(const Job &job, long lon
         job.cpu_cores,
         job.memory,
     };
+
     running_jobs.push_back(running_job);
 
     ScheduleRecord record{
@@ -59,11 +64,24 @@ void MachineState::releaseJob(const RunningJob &running_job) {
     remaining_memory += running_job.memory_used;
 
     vector<RunningJob> remaining;
+
     for (size_t i = 0; i < running_jobs.size(); ++i) {
         if (running_jobs[i].job_id != running_job.job_id) {
             remaining.push_back(running_jobs[i]);
         }
     }
+
     running_jobs = remaining;
 }
 
+int MachineState::getRemainingGpu() const {
+    return remaining_gpu;
+}
+
+int MachineState::getRemainingCpu() const {
+    return remaining_cpu;
+}
+
+int MachineState::getRemainingMemory() const {
+    return remaining_memory;
+}
