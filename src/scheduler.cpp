@@ -1,5 +1,5 @@
 ﻿#include "scheduler.h"
-
+#include <iostream>
 #include <algorithm>
 #include <stdexcept>
 #include <queue>
@@ -104,26 +104,25 @@ GreedyScheduler::GreedyScheduler(
 // ============================================================
 // schedule()
 // ============================================================
-
 vector<ScheduleRecord> GreedyScheduler::schedule() {
 
-    if (jobs.empty()) {
-        return {};
-    }
+    if (jobs.empty()) return {};
 
     long long current_time = jobs.front().release_time;
     int next_job_index = 0;
 
     unordered_map<int, ScheduleRecord> records;
 
-    priority_queue<
-        FinishEvent,
-        vector<FinishEvent>,
-        greater<FinishEvent>
-    > running_heap;
+    priority_queue<FinishEvent, vector<FinishEvent>, greater<FinishEvent>> running_heap;
 
     vector<Job> pending_vec;
     pending_vec.reserve(jobs.size());
+
+    // Backfill stats
+    long long backfill_attempts = 0;
+    long long backfill_successes = 0;
+
+    constexpr bool ENABLE_BACKFILL = false;
 
     while ((int)records.size() < (int)jobs.size()) {
 
@@ -131,146 +130,108 @@ vector<ScheduleRecord> GreedyScheduler::schedule() {
 
         while (next_job_index < (int)jobs.size() &&
                jobs[next_job_index].release_time <= current_time) {
-
-            pending_vec.push_back(jobs[next_job_index]);
-            ++next_job_index;
+            pending_vec.push_back(jobs[next_job_index++]);
         }
 
-        // =====================================================
-        // 动态统计等待队列 GPU 75% 分位数
-        // =====================================================
+        // =========================
+        // Dual Queue view (no mutation)
+        // =========================
+        vector<Job> large, small;
+
         if (!pending_vec.empty()) {
+            int threshold = cached_dynamic_threshold_gpu;
 
-            vector<int> gpu_demands;
-            gpu_demands.reserve(pending_vec.size());
-
-            for (const auto &job : pending_vec) {
-                gpu_demands.push_back(job.min_gpu);
+            for (auto &j : pending_vec) {
+                if (j.min_gpu >= threshold) large.push_back(j);
+                else small.push_back(j);
             }
-
-            size_t idx = static_cast<size_t>(gpu_demands.size() * 3 / 4);
-            if (idx >= gpu_demands.size()) idx = gpu_demands.size() - 1;
-
-            nth_element(
-                gpu_demands.begin(),
-                gpu_demands.begin() + idx,
-                gpu_demands.end()
-            );
-
-            cached_dynamic_threshold_gpu = gpu_demands[idx];
-        }
-        else {
-            cached_dynamic_threshold_gpu = 1;
         }
 
-        // =====================================================
-        // 回填调度 + Fit-aware Priority + 同优先级小GPU优先
-        // =====================================================
         bool progress = true;
 
         while (progress) {
-
             progress = false;
 
-            // 每轮重建缓存
-            vector<char> can_start(jobs.size() + 1, 0);
-            for (const auto &job : pending_vec) {
-                const auto &entries = feasible_machines.at(job.job_id);
-                for (const auto &entry : entries) {
-                    if (machines[entry.first].canStart(job, entry.second)) {
-                        can_start[job.job_id] = 1;
-                        break;
+            // ================= Main Pass =================
+            auto try_group = [&](vector<Job> &group) {
+                vector<Job> remain;
+
+                for (auto &job : group) {
+                    auto res = tryStartOneJob(job, current_time);
+                    if (res.has_value) {
+                        records[job.job_id] = res.record;
+                        running_heap.push(FinishEvent{
+                            res.running_job.finish_time,
+                            res.running_job.server_id,
+                            res.running_job.job_id,
+                            res.running_job
+                        });
+                        progress = true;
+                    } else {
+                        remain.push_back(job);
+                    }
+                }
+                group.swap(remain);
+            };
+
+            try_group(large);
+            try_group(small);
+
+            // ================= Backfill (pure probe) =================
+            if (ENABLE_BACKFILL && !small.empty()) {
+
+                int tries = 0;
+                const int LIMIT = 50;
+
+                for (auto &job : small) {
+                    if (tries++ >= LIMIT) break;
+
+                    if (job.min_gpu > 2 || job.duration > 500) continue;
+
+                    ++backfill_attempts;
+
+                    auto res = tryStartOneJob(job, current_time);
+                    if (res.has_value) {
+                        ++backfill_successes;
+
+                        records[job.job_id] = res.record;
+                        running_heap.push(FinishEvent{
+                            res.running_job.finish_time,
+                            res.running_job.server_id,
+                            res.running_job.job_id,
+                            res.running_job
+                        });
+
+                        progress = true;
                     }
                 }
             }
-
-            sort(pending_vec.begin(), pending_vec.end(),
-                [this, current_time, &can_start](const Job &a, const Job &b) {
-                    bool a_can = can_start[a.job_id] == 1;
-                    bool b_can = can_start[b.job_id] == 1;
-
-                    if (a_can && !b_can) return true;
-                    if (!a_can && b_can) return false;
-
-                    long long sa = dynamicPriorityScore(a, current_time);
-                    long long sb = dynamicPriorityScore(b, current_time);
-
-                    if (sa != sb) return sa > sb;
-
-                    // ===== 同优先级下：小GPU优先 =====
-                    if (a.min_gpu != b.min_gpu)
-                        return a.min_gpu < b.min_gpu;
-
-                    if (a.duration != b.duration)
-                        return a.duration < b.duration;
-
-                    return a.job_id < b.job_id;
-                }
-            );
-
-            vector<Job> remain;
-            remain.reserve(pending_vec.size());
-
-            for (const auto &job : pending_vec) {
-
-                auto started =
-                    tryStartOneJob(
-                        job,
-                        current_time
-                    );
-
-                if (started.has_value) {
-
-                    records[job.job_id] =
-                        started.record;
-
-                    running_heap.push(
-                        FinishEvent{
-                            started.running_job.finish_time,
-                            started.running_job.server_id,
-                            started.running_job.job_id,
-                            started.running_job
-                        }
-                    );
-
-                    progress = true;
-                }
-                else {
-                    remain.push_back(job);
-                }
-            }
-
-            pending_vec.swap(remain);
         }
 
-        if ((int)records.size() ==
-            (int)jobs.size()) {
-            break;
-        }
+        // merge back
+        pending_vec.clear();
+        pending_vec.insert(pending_vec.end(), large.begin(), large.end());
+        pending_vec.insert(pending_vec.end(), small.begin(), small.end());
 
-        current_time =
-            nextEventTime(
-                current_time,
-                next_job_index,
-                running_heap
-            );
+        if ((int)records.size() == (int)jobs.size()) break;
+
+        current_time = nextEventTime(current_time, next_job_index, running_heap);
     }
 
-    vector<ScheduleRecord> ordered;
-    ordered.reserve(records.size());
+    // stats
+    std::cerr << "\nBackfill success rate: "
+              << (backfill_attempts ? 100.0 * backfill_successes / backfill_attempts : 0)
+              << "%\n";
 
-    for (int job_id = 1;
-         job_id <= (int)jobs.size();
-         ++job_id) {
+    vector<ScheduleRecord> out;
+    out.reserve(records.size());
 
-        ordered.push_back(
-            records.at(job_id)
-        );
+    for (int i = 1; i <= (int)jobs.size(); i++) {
+        out.push_back(records.at(i));
     }
 
-    return ordered;
+    return out;
 }
-
 // ============================================================
 // buildFeasibleMachines()
 // ============================================================
