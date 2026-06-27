@@ -3,3 +3,32 @@ evaluate.py
 testcases/
 *.out
 *.log
+
+# 编译产物
+build/
+*.exe
+*.pdb
+*.ilk
+*.obj
+*.vcxproj
+*.sln
+
+# 测试输入输出
+testcases/
+*.in
+*.out
+*.log
+
+# Python 工具
+*.pyc
+evaluate.py
+
+# 备份文件
+*_backup.cpp
+*_new.cpp
+*.bak
+
+# 临时文件
+*.tmp
+*.temp
+*.swp

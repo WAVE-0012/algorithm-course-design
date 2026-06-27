@@ -34,7 +34,7 @@ private:
     int remaining_gpu = 0;
     int remaining_cpu = 0;
     int remaining_memory = 0;
-
+    int cached_dynamic_threshold_gpu = 1;
     std::vector<RunningJob> running_jobs;
 };
 

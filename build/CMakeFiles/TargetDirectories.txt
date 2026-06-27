@@ -1,3 +1,0 @@
-C:/Users/13569/Desktop/algorithm-course-design/build/CMakeFiles/gpu_scheduler.dir
-C:/Users/13569/Desktop/algorithm-course-design/build/CMakeFiles/ALL_BUILD.dir
-C:/Users/13569/Desktop/algorithm-course-design/build/CMakeFiles/ZERO_CHECK.dir
